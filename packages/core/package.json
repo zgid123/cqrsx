@@ -2,7 +2,6 @@
   "name": "@cqrsx/core",
   "version": "0.0.1",
   "description": "CQRS utilities for TypeScript applications.",
-  "private": true,
   "type": "module",
   "imports": {
     "#/*": "./src/*"
