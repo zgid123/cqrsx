@@ -1,7 +1,8 @@
 import type { Command, ICommandHandler } from './command';
+import type { Event, IEventHandler } from './event';
 import type { TConstructor } from './interface';
 import type { IQueryHandler, Query } from './query';
-import { isCommandClass, isQueryClass } from './utils';
+import { isCommandClass, isEventClass, isQueryClass } from './utils';
 
 export class Cqrsx {
   #commandHandlers = new Map<
@@ -14,6 +15,8 @@ export class Cqrsx {
     IQueryHandler<Query<unknown>, unknown>
   >();
 
+  #eventHandlers = new Map<TConstructor<Event>, IEventHandler<Event>[]>();
+
   public register<T extends Command>(
     messageClass: TConstructor<T>,
     handler: ICommandHandler<T, unknown>,
@@ -22,11 +25,16 @@ export class Cqrsx {
     messageClass: TConstructor<T>,
     handler: IQueryHandler<T, unknown>,
   ): this;
+  public register<T extends Event>(
+    messageClass: TConstructor<T>,
+    handler: IEventHandler<T>,
+  ): this;
   public register(
     messageClass: TConstructor<unknown>,
     handler:
       | ICommandHandler<Command, unknown>
-      | IQueryHandler<Query<unknown>, unknown>,
+      | IQueryHandler<Query<unknown>, unknown>
+      | IEventHandler<Event>,
   ): this {
     if (isCommandClass(messageClass)) {
       if (this.#commandHandlers.has(messageClass)) {
@@ -62,8 +70,27 @@ export class Cqrsx {
       return this;
     }
 
+    if (isEventClass(messageClass)) {
+      const handlers = this.#eventHandlers.get(messageClass) ?? [];
+
+      if (handlers.includes(handler as IEventHandler<Event>)) {
+        console.warn(
+          `Event handler for ${messageClass.name} is already registered.`,
+        );
+
+        return this;
+      }
+
+      this.#eventHandlers.set(messageClass, [
+        ...handlers,
+        handler as IEventHandler<Event>,
+      ]);
+
+      return this;
+    }
+
     throw new Error(
-      `Invalid message class provided. Must extend Command or Query.`,
+      'Invalid message class provided. Must extend Command, Query, or Event.',
     );
   }
 
@@ -97,5 +124,20 @@ export class Cqrsx {
     }
 
     throw new Error(`Unknown message structure: "${messageClass.name}"`);
+  }
+
+  public async publish(event: Event): Promise<void> {
+    const eventClass = event.constructor as TConstructor<unknown>;
+    const eventClassName = eventClass.name;
+
+    if (!isEventClass(eventClass)) {
+      throw new Error(`Unknown event structure: "${eventClassName}"`);
+    }
+
+    const handlers = this.#eventHandlers.get(eventClass) ?? [];
+
+    for (const handler of handlers) {
+      await handler.exec(event);
+    }
   }
 }
