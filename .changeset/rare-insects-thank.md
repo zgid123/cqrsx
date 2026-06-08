@@ -1,5 +1,0 @@
----
-"@cqrsx/core": patch
----
-
-release
