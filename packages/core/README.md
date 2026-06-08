@@ -92,6 +92,51 @@ const userName = await cqrsx.exec(new GetUserNameQuery('123'));
 await cqrsx.publish(new UserCreatedEvent('123'));
 ```
 
+## Middleware
+
+Middleware runs around commands, queries, and events. Register middleware with `use`.
+
+```ts
+import type { IMiddleware, IMiddlewareParams } from '@cqrsx/core';
+
+class LoggingMiddleware implements IMiddleware {
+  public async exec({
+    next,
+    context,
+  }: IMiddlewareParams): Promise<unknown> {
+    console.log(`before:${context.kind}:${context.messageClass.name}`);
+
+    const result = await next();
+
+    console.log(`after:${context.kind}:${context.messageClass.name}`);
+
+    return result;
+  }
+}
+
+const cqrsx = new Cqrsx()
+  .use(new LoggingMiddleware())
+  .use(async ({ context, next }) => {
+    console.log(`before:${context.kind}:${context.messageClass.name}`);
+
+    const result = await next();
+
+    console.log(`after:${context.kind}:${context.messageClass.name}`);
+
+    return result;
+  })
+  .register(CreateUserCommand, new CreateUserCommandHandler())
+  .register(GetUserNameQuery, new GetUserNameQueryHandler())
+  .register(UserCreatedEvent, new UserCreatedEventHandler());
+```
+
+Middleware can be a function or a class instance with an `exec` method. It runs
+in registration order. It can short-circuit by returning without calling `next`,
+and can transform query results by returning a different value.
+
+For events, middleware wraps the whole publish flow once. Event handlers still
+run sequentially in registration order.
+
 ## Object Parameters
 
 Commands, queries, and events can use object-shaped constructor parameters.

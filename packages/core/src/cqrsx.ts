@@ -1,6 +1,7 @@
 import type { Command, ICommandHandler } from './command';
 import type { Event, IEventHandler } from './event';
-import type { TConstructor } from './interface';
+import type { ICqrsxContext, TConstructor } from './interface';
+import type { TMiddleware, TMiddlewareFunction, TNext } from './middleware';
 import type { IQueryHandler, Query } from './query';
 import { isCommandClass, isEventClass, isQueryClass } from './utils';
 
@@ -16,6 +17,20 @@ export class Cqrsx {
   >();
 
   #eventHandlers = new Map<TConstructor<Event>, IEventHandler<Event>[]>();
+
+  #middlewares: TMiddlewareFunction[] = [];
+
+  public use(middleware: TMiddleware): this {
+    if (typeof middleware === 'function') {
+      this.#middlewares.push(middleware);
+
+      return this;
+    }
+
+    this.#middlewares.push((params) => middleware.exec(params));
+
+    return this;
+  }
 
   public register<T extends Command>(
     messageClass: TConstructor<T>,
@@ -100,27 +115,47 @@ export class Cqrsx {
     const messageClass = message.constructor as TConstructor<unknown>;
 
     if (isCommandClass(messageClass)) {
-      const handler = this.#commandHandlers.get(messageClass);
+      return this.#execWithMiddleware(
+        {
+          kind: 'command',
+          message,
+          messageClass,
+        },
+        async () => {
+          const handler = this.#commandHandlers.get(messageClass);
 
-      if (!handler) {
-        throw new Error(
-          `No handler registered for command class: "${messageClass.name}"`,
-        );
-      }
+          if (!handler) {
+            throw new Error(
+              `No handler registered for command class: "${messageClass.name}"`,
+            );
+          }
 
-      return handler.exec(message);
+          return handler.exec(message);
+        },
+      );
     }
 
     if (isQueryClass(messageClass)) {
-      const handler = this.#queryHandlers.get(messageClass);
+      const query = message as Query<unknown>;
 
-      if (!handler) {
-        throw new Error(
-          `No handler registered for query class: "${messageClass.name}"`,
-        );
-      }
+      return this.#execWithMiddleware(
+        {
+          kind: 'query',
+          message: query,
+          messageClass,
+        },
+        async () => {
+          const handler = this.#queryHandlers.get(messageClass);
 
-      return handler.exec(message as Query<unknown>);
+          if (!handler) {
+            throw new Error(
+              `No handler registered for query class: "${messageClass.name}"`,
+            );
+          }
+
+          return handler.exec(query);
+        },
+      );
     }
 
     throw new Error(`Unknown message structure: "${messageClass.name}"`);
@@ -136,8 +171,45 @@ export class Cqrsx {
 
     const handlers = this.#eventHandlers.get(eventClass) ?? [];
 
-    for (const handler of handlers) {
-      await handler.exec(event);
-    }
+    await this.#execWithMiddleware(
+      {
+        kind: 'event',
+        message: event,
+        messageClass: eventClass,
+      },
+      async () => {
+        for (const handler of handlers) {
+          await handler.exec(event);
+        }
+      },
+    );
+  }
+
+  async #execWithMiddleware<TResult>(
+    context: ICqrsxContext,
+    dispatch: TNext<TResult>,
+  ): Promise<TResult> {
+    let index = -1;
+
+    const run = async (nextIndex: number): Promise<TResult> => {
+      if (nextIndex <= index) {
+        throw new Error('Middleware next() called multiple times.');
+      }
+
+      index = nextIndex;
+
+      const middleware = this.#middlewares[nextIndex];
+
+      if (!middleware) {
+        return dispatch();
+      }
+
+      return middleware({
+        context,
+        next: () => run(nextIndex + 1),
+      }) as Promise<TResult>;
+    };
+
+    return run(0);
   }
 }

@@ -1,5 +1,6 @@
 import type { Command } from '../command';
 import { Cqrsx } from '../cqrsx';
+import type { IMiddleware, IMiddlewareParams } from '../middleware';
 import {
   ArchiveUserCommand,
   ArchiveUserCommandHandler,
@@ -131,6 +132,271 @@ describe('#Cqrsx', () => {
         expect(() => cqrsx.register(invalidMessageClass, handler)).toThrow(
           'Invalid message class provided. Must extend Command, Query, or Event.',
         );
+      });
+    });
+  });
+
+  describe('.use', () => {
+    suite('when chaining middleware and handler registrations', () => {
+      it('returns the current instance and executes the registered handler', async () => {
+        const cqrsx = new Cqrsx();
+        const handler = new CreateUserCommandHandler();
+        const command = new CreateUserCommand('Alpha');
+
+        const result = cqrsx
+          .use(async ({ next }) => next())
+          .register(CreateUserCommand, handler);
+
+        await cqrsx.exec(command);
+
+        expect(result).toBe(cqrsx);
+        expect(handler.executedCommand).toBe(command);
+      });
+    });
+
+    suite('when executing a command with multiple middleware', () => {
+      it('wraps the command handler in registration order', async () => {
+        const cqrsx = new Cqrsx();
+        const records: string[] = [];
+        const handler = new CreateUserCommandHandler();
+        const command = new CreateUserCommand('Alpha');
+
+        cqrsx
+          .use(async ({ context, next }) => {
+            records.push(`first:before:${context.kind}`);
+
+            await next();
+
+            records.push('first:after');
+          })
+          .use(async ({ context, next }) => {
+            records.push(`second:before:${context.messageClass.name}`);
+
+            await next();
+
+            records.push('second:after');
+          })
+          .register(CreateUserCommand, handler);
+
+        await cqrsx.exec(command);
+
+        expect(records).toEqual([
+          'first:before:command',
+          'second:before:CreateUserCommand',
+          'second:after',
+          'first:after',
+        ]);
+        expect(handler.executedCommand).toBe(command);
+      });
+    });
+
+    suite('when using a class middleware instance', () => {
+      it('wraps the handler through its exec method', async () => {
+        class RecordingMiddleware implements IMiddleware {
+          readonly #records: string[];
+
+          public constructor(records: string[]) {
+            this.#records = records;
+          }
+
+          public async exec({
+            context,
+            next,
+          }: IMiddlewareParams): Promise<unknown> {
+            this.#records.push(`class:before:${context.kind}`);
+
+            const result = await next();
+
+            this.#records.push(`class:after:${context.messageClass.name}`);
+
+            return result;
+          }
+        }
+
+        const cqrsx = new Cqrsx();
+        const records: string[] = [];
+        const handler = new GetUserNameQueryHandler();
+
+        cqrsx
+          .use(new RecordingMiddleware(records))
+          .register(GetUserNameQuery, handler);
+
+        const result = await cqrsx.exec(new GetUserNameQuery('123'));
+
+        expect(result).toBe('user:123');
+        expect(records).toEqual([
+          'class:before:query',
+          'class:after:GetUserNameQuery',
+        ]);
+      });
+    });
+
+    suite('when executing a query with middleware', () => {
+      it('preserves the query handler result', async () => {
+        const cqrsx = new Cqrsx();
+        const handler = new GetUserNameQueryHandler();
+        const query = new GetUserNameQuery('123');
+
+        cqrsx
+          .use(async ({ context, next }) => {
+            expect(context.kind).toBe('query');
+            expect(context.message).toBe(query);
+
+            return next();
+          })
+          .register(GetUserNameQuery, handler);
+
+        const result = await cqrsx.exec(query);
+
+        expect(result).toBe('user:123');
+        expect(handler.executedQuery).toBe(query);
+      });
+    });
+
+    suite('when publishing an event with middleware', () => {
+      it('wraps the full publish flow once around all event handlers', async () => {
+        const cqrsx = new Cqrsx();
+        const records: string[] = [];
+
+        cqrsx
+          .use(async ({ context, next }) => {
+            records.push(`middleware:before:${context.kind}`);
+
+            await next();
+
+            records.push('middleware:after');
+          })
+          .register(
+            UserCreatedEvent,
+            new RecordingUserCreatedEventHandler('first', records),
+          )
+          .register(
+            UserCreatedEvent,
+            new RecordingUserCreatedEventHandler('second', records),
+          );
+
+        await cqrsx.publish(new UserCreatedEvent('123'));
+
+        expect(records).toEqual([
+          'middleware:before:event',
+          'first:123',
+          'second:123',
+          'middleware:after',
+        ]);
+      });
+    });
+
+    suite('when middleware short-circuits a command', () => {
+      it('skips the command handler', async () => {
+        const cqrsx = new Cqrsx();
+        const handler = new CreateUserCommandHandler();
+        const command = new CreateUserCommand('Alpha');
+
+        cqrsx.use(async () => undefined).register(CreateUserCommand, handler);
+
+        await cqrsx.exec(command);
+
+        expect(handler.executedCommand).toBeNull();
+      });
+    });
+
+    suite('when middleware short-circuits a query', () => {
+      it('returns the middleware result and skips the query handler', async () => {
+        const cqrsx = new Cqrsx();
+        const handler = new GetUserNameQueryHandler();
+
+        cqrsx
+          .use(async () => 'middleware:123')
+          .register(GetUserNameQuery, handler);
+
+        const result = await cqrsx.exec(new GetUserNameQuery('123'));
+
+        expect(result).toBe('middleware:123');
+        expect(handler.executedQuery).toBeNull();
+      });
+    });
+
+    suite('when middleware short-circuits an event', () => {
+      it('skips every event handler', async () => {
+        const cqrsx = new Cqrsx();
+        const records: string[] = [];
+
+        cqrsx
+          .use(async () => undefined)
+          .register(
+            UserCreatedEvent,
+            new RecordingUserCreatedEventHandler('first', records),
+          )
+          .register(
+            UserCreatedEvent,
+            new RecordingUserCreatedEventHandler('second', records),
+          );
+
+        await cqrsx.publish(new UserCreatedEvent('123'));
+
+        expect(records).toEqual([]);
+      });
+    });
+
+    suite('when middleware transforms a query result', () => {
+      it('returns the transformed result', async () => {
+        const cqrsx = new Cqrsx();
+
+        cqrsx
+          .use(async ({ next }) => {
+            const result = await next();
+
+            return (result as string).toUpperCase();
+          })
+          .register(GetUserNameQuery, new GetUserNameQueryHandler());
+
+        const result = await cqrsx.exec(new GetUserNameQuery('123'));
+
+        expect(result).toBe('USER:123');
+      });
+    });
+
+    suite('when middleware rejects', () => {
+      it('rejects command execution and skips the handler', async () => {
+        const cqrsx = new Cqrsx();
+        const handler = new CreateUserCommandHandler();
+
+        cqrsx
+          .use(async () => {
+            throw new Error('Middleware failed.');
+          })
+          .register(CreateUserCommand, handler);
+
+        await expect(
+          cqrsx.exec(new CreateUserCommand('Alpha')),
+        ).rejects.toThrow('Middleware failed.');
+        expect(handler.executedCommand).toBeNull();
+      });
+
+      it('rejects event publishing and skips the remaining chain', async () => {
+        const cqrsx = new Cqrsx();
+        const records: string[] = [];
+
+        cqrsx
+          .use(async () => {
+            records.push('first');
+
+            throw new Error('Middleware failed.');
+          })
+          .use(async ({ next }) => {
+            records.push('second');
+
+            return next();
+          })
+          .register(
+            UserCreatedEvent,
+            new RecordingUserCreatedEventHandler('handler', records),
+          );
+
+        await expect(
+          cqrsx.publish(new UserCreatedEvent('123')),
+        ).rejects.toThrow('Middleware failed.');
+        expect(records).toEqual(['first']);
       });
     });
   });
