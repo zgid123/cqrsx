@@ -23,6 +23,7 @@
     "release": "pnpm build && changeset version && pnpm publish -r",
     "set-release": "changeset"
   },
+  "packageManager": "pnpm@11.1.2",
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
